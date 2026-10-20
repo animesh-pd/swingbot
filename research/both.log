@@ -1,0 +1,16 @@
+downloading...
+
+== A: position count, original watchlist, 2y ==
+orig wl, 3 x 33%                   2y | total +12.4% | maxDD 13.9% | months up 13/24 | worst mo -10.0% | trades 47 | SPY +31.1% | watchlist B&H +107.0% | 110s
+orig wl, 5 x 20%                   2y | total +51.6% | maxDD 12.1% | months up 17/24 | worst mo -6.5% | trades 85 | SPY +31.1% | watchlist B&H +107.0% | 205s
+orig wl, 6 x 16%                   2y | total +35.0% | maxDD 10.6% | months up 18/24 | worst mo -7.0% | trades 92 | SPY +31.1% | watchlist B&H +107.0% | 296s
+orig wl, 8 x 12%                   2y | total +30.7% | maxDD 14.2% | months up 17/24 | worst mo -6.8% | trades 101 | SPY +31.1% | watchlist B&H +107.0% | 385s
+
+== B: out-of-sample watchlist, 4y (includes 2022 bear market) ==
+NEW wl, 3 x 33%                    4y | total +50.3% | maxDD 14.0% | months up 28/48 | worst mo -6.7% | trades 96 | SPY +108.1% | watchlist B&H +249.9% | 701s
+NEW wl, 5 x 20%                    4y | total +39.1% | maxDD 12.4% | months up 26/48 | worst mo -6.5% | trades 158 | SPY +108.1% | watchlist B&H +249.9% | 995s
+NEW wl, 8 x 12%                    4y | total +48.1% | maxDD 8.9% | months up 29/48 | worst mo -5.8% | trades 241 | SPY +108.1% | watchlist B&H +249.9% | 1268s
+orig wl, 3 x 33%                   4y | total +71.1% | maxDD 10.3% | months up 29/48 | worst mo -4.6% | trades 92 | SPY +108.1% | watchlist B&H +494.4% | 24663s
+orig wl, 5 x 20%                   4y | total +103.7% | maxDD 8.9% | months up 33/48 | worst mo -5.2% | trades 158 | SPY +108.1% | watchlist B&H +494.4% | 24854s
+orig wl, 8 x 12%                   4y | total +77.4% | maxDD 11.1% | months up 32/48 | worst mo -5.1% | trades 214 | SPY +108.1% | watchlist B&H +494.4% | 25041s
+DONE

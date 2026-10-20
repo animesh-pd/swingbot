@@ -1,0 +1,9 @@
+# Local state, logs and secrets never belong in the repo
+state/
+state_*/
+logs/
+*.bak*
+__pycache__/
+*.pyc
+.env
+*.key

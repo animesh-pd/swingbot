@@ -1,0 +1,105 @@
+# SwingBot configuration. Every rule the bot follows lives here.
+# Paper trading only until you change `mode` (and even then, live mode is not built yet).
+
+mode: alerts           # alerts = scan and notify only | paper = simulated account (mirrored to the sandbox only if send_orders is true)
+
+capital:
+  total: 5000
+  shares_bucket: 5000         # was 2500 / 2500: options lost money in every backtest, so shares-only for now
+  options_bucket: 0
+
+# Pause NEW bullish entries while this index closes below its moving average. Exits and stops are unchanged.
+market_filter:
+  enabled: false              # OFF: in a 4-year backtest it cut return from +104% to +55% and did not lower drawdown
+  symbol: SPY
+  sma_days: 200
+
+goals:
+  monthly_target_pct: 20      # tracked in reports only; never used to size trades
+  realistic_target_pct: 4     # what the system is designed around
+
+shares:
+  watchlist: [MU, JPM, LLY, XOM, CVX, CAT, GE, V, COST, ISRG]
+  max_positions: 5            # was 3 at 40%; 5 smaller positions held up better in backtests
+  max_position_pct: 0.20      # of the shares bucket, per position
+  stop_loss_pct: 0.10         # hard stop, 10% below entry (your rule)
+  take_profit_pct: 0.20       # trim half here
+  trail_pct: 0.10             # trail the rest this far below the high after trimming
+  max_hold_days: 60           # time stop: 1-2 month swing window
+  min_signal_score: 3         # out of 5 technical checks
+
+options:
+  watchlist: [SPY, QQQ, AAPL, AMD, NVDA, PLTR, SOFI, XOM, JPM, AMZN]
+  max_positions: 0            # OFF (was 3): options had profit factor 0.26-0.35 in backtests. SPY stays listed for the market filter.
+  max_position_usd: 1200      # most you pay per position (a single option's premium, or a spread's debit)
+  stop_loss_pct: 0.30         # your 20% rule triggers on normal noise; 30% suggested. Edit if you disagree.
+  take_profit_pct: 0.50
+  target_dte_min: 30          # buy 30-45 days out...
+  target_dte_max: 45
+  max_hold_days: 14           # ...and exit within your 2-week window
+  exit_before_events: true    # close options the session before earnings/FOMC/CPI/jobs (before the weekend for a Monday event)
+  min_hold_days: 5            # skip entries that an upcoming event would cut shorter than this
+  target_delta: 0.50          # the option you buy (the long leg of a spread)
+  structure: spread_first     # spread_first | spread_only | single_only
+  spread_short_delta: 0.30    # the option you sell against it, further out of the money
+  max_debit_pct_of_width: 0.60  # skip spreads where you'd pay more than 60% of the strike width
+  max_bid_ask_spread_pct: 0.10
+  min_open_interest: 500
+  min_signal_score: 4
+  allow_puts: true            # bearish setups buy puts
+
+# Strategy C: slow monthly trend rotation across ETFs, its own separate account (state_rotation/).
+# Run it with `python run.py rotate`. It does not share cash or positions with the swing bot above.
+rotation:
+  mode: alerts               # alerts = print the plan, you trade by hand, then `rotate --record` | paper = records it for you
+  capital: 5000
+  top_n: 3                   # hold the 3 strongest ETFs, equal weight; any slot with no qualifier stays in cash
+  momentum_days: 252         # rank by 12-month return (6-month ranking tested much worse)
+  sma_days: 200              # an ETF must be above its 200-day average to be held
+  min_trade_usd: 100         # ignore tiny rebalancing trades
+  universe: [XLK, XLF, XLE, XLV, XLY, XLP, XLI, XLB, XLU, QQQ, IWM, EFA, EEM, GLD, TLT, IEF, DBC]   # SPY left out on purpose
+
+risk:
+  max_daily_loss_pct: 0.05    # of total capital; halts new entries for the day
+  max_drawdown_pct: 0.20      # kill switch: stops all new entries until you reset
+  min_reward_risk: 1.0        # skip setups sitting right under resistance (or above support, for puts)
+  pdt_guard: true            # blocks same-day round trips (under-$25K rule)
+  earnings_blackout_days: 3   # no new entries this close to earnings
+  macro_blackout_days: 1      # no new options entries the day before FOMC/CPI/jobs
+
+# Fill in dates each month (FOMC, CPI, jobs report). The bot avoids new options entries around them.
+macro_events:
+  - {date: 2026-10-28, name: FOMC decision}
+  - {date: 2026-11-06, name: Jobs report}
+  - {date: 2026-11-12, name: CPI}
+  - {date: 2026-12-04, name: Jobs report}
+  - {date: 2026-12-09, name: FOMC decision}
+  - {date: 2026-12-10, name: CPI}
+
+news:
+  enabled: true
+  lookback_hours: 24
+  # Headlines matching these themes raise the risk level of the mapped tickers.
+  themes:
+    china_chips:   {keywords: [china chip, export control, cxmt, smic, taiwan, tsmc, huawei], tickers: [MU, AMD, NVDA, QQQ]}
+    middle_east:   {keywords: [iran, israel, strait of hormuz, opec, houthi, red sea], tickers: [XOM, CVX]}
+    russia_ukraine: {keywords: [russia, ukraine, nato, sanctions], tickers: [XOM, CVX, GE]}
+    fed_rates:     {keywords: [federal reserve, fed rate, fomc, powell, warsh, treasury yields, hot inflation], also_hot: [hike, hawkish], tickers: [JPM, V, SOFI, QQQ, SPY]}
+    ai_bubble:     {keywords: [ai bubble, coreweave, data center capex, ai spending], also_hot: [credit, downgrade, debt], tickers: [NVDA, AMD, MU, PLTR, QQQ]}
+    tariffs_trade: {keywords: [tariff, trade war, trade deal], also_hot: [imposes, imposed, threatens, retaliatory], tickers: [AAPL, AMZN, CAT, COST, SPY]}
+    pharma_policy: {keywords: [drug pricing, fda, medicare negotiation], tickers: [LLY, ISRG]}
+  # Used only until a theme has 5 days of history: risk 1.0 at this many on-topic escalation headlines.
+  # After that, risk is relative to the theme's own typical count (0 = normal, 1.0 = double normal).
+  hot_headlines_for_max: 60
+  # 0-1 risk score at which new entries in affected tickers are blocked
+  block_threshold: 0.6
+
+tastytrade:
+  sandbox: true      # sandbox ONLY. Order sending refuses to run if this is false.
+  send_orders: false # set true to mirror each bot's paper SHARE positions to the sandbox account
+  max_order_usd: 2500   # skip any single order bigger than this
+  client_id: YOUR-SANDBOX-OAUTH-CLIENT-ID   # from your own tastytrade sandbox OAuth app; secret and refresh token live in keyring
+
+alerts:
+  console: true
+  ntfy_topic: ""     # optional: free phone push via the ntfy app, e.g. "swingbot-yourname-8x2k"
