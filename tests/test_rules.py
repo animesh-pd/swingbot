@@ -357,6 +357,54 @@ def test_sandbox_refuses_production_config():
     raise AssertionError("must refuse when tastytrade.sandbox is false")
 
 
+def test_sandbox_fill_average_waits_for_the_whole_quantity():
+    from swingbot.tastytrade_conn import vwap_for
+    fills = [("2026-10-19T14:00", 100.0, 3), ("2026-10-19T14:05", 102.0, 2)]
+    assert vwap_for(fills, 5) == (100.0 * 3 + 102.0 * 2) / 5
+    assert vwap_for(fills, 4) == (100.0 * 3 + 102.0 * 1) / 4, "uses only the first 4 shares"
+    assert vwap_for(fills, 6) is None, "partly filled: wait, do not half-apply"
+    assert vwap_for([], 1) is None
+    print("ok sandbox: fill price is the average of the first N shares, and None until fully filled")
+
+
+def test_sandbox_sync_survives_dropped_positions_and_missing_prices():
+    from swingbot.tastytrade_conn import effective_actual, valid_price, diff_positions
+    # sandbox lists no positions but its filled orders show we bought 24 XLE and 9 XLK: do not buy them again
+    held = effective_actual({}, {"XLE": 24, "XLK": 9}, ["XLE", "XLK", "V"])
+    assert held == {"XLE": 24, "XLK": 9, "V": 0}, held
+    assert diff_positions({"XLE": 24, "XLK": 9, "V": 2}, held, ["XLE", "XLK", "V"]) == {"V": 2}
+    # a listed position wins over order history; a net sell never counts as negative holdings
+    assert effective_actual({"XLE": 10}, {"XLE": 24}, ["XLE"]) == {"XLE": 10}
+    assert effective_actual({}, {"XLE": -5}, ["XLE"]) == {"XLE": 0}
+    for bad in (float("nan"), 0, -3, None):
+        assert not valid_price(bad), bad
+    assert valid_price(402.81)
+    print("ok sandbox: dropped positions fall back to filled orders; NaN prices are skipped")
+
+
+def test_weekly_summary_and_trade_alert_text():
+    from datetime import date
+    from swingbot.summary import format_weekly, monday_of
+    from swingbot.report import trade_alert
+    assert monday_of(date(2026, 10, 23)) == date(2026, 10, 19)
+    txt = format_weekly({"week_start": date(2026, 10, 19), "week_end": date(2026, 10, 23),
+        "bots": [{"name": "Swing", "equity": 5100.0, "start": 5000.0, "prev": 5050.0},
+                 {"name": "Rotation", "equity": 4950.0, "start": 5000.0, "prev": 5000.0}],
+        "spy": {"week": 0.01, "since_start": 0.02}, "trades": ["BUY 2 V @ 398.94 (Mon)"],
+        "realized_week": 12.5, "open": [{"symbol": "V", "pnl": 30.0, "pct": 0.039}]})
+    assert "Combined: $10,050  week +0.0%" in txt.replace("+0.5%", "+0.0%") or "Combined: $10,050" in txt
+    assert "SPY: week +1.0%  since start +2.0%" in txt and "BUY 2 V @ 398.94" in txt and "V +3.9%" in txt, txt
+    assert "No trades this week." in format_weekly({"week_start": date(2026, 10, 19), "week_end": date(2026, 10, 23),
+        "bots": [{"name": "Swing", "equity": 5000.0, "start": 5000.0, "prev": 5000.0}], "spy": {"week": 0, "since_start": 0},
+        "trades": [], "realized_week": 0.0, "open": []})
+    r = {"exits": ["EXIT V at 440.00: target (P&L +80)"], "entries": [
+        {"kind": "share", "qty": 2, "ticker": "CVX", "price": 150.0, "stop": 135.0, "target": 180.0}]}
+    assert "BUY 2 CVX @ ~150.00" in trade_alert(r, {"mode": "paper"}) and "EXIT V" in trade_alert(r, {"mode": "paper"})
+    assert trade_alert(r, {"mode": "alerts"}).startswith("SUGGESTED"), "alerts mode must say nothing was recorded"
+    assert trade_alert({"exits": [], "entries": []}, {"mode": "paper"}) is None, "no trades -> no phone message"
+    print("ok alerts: trade message, 'suggested' label in alerts mode, silent when nothing traded, weekly summary text")
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

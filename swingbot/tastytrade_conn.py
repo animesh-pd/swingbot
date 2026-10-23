@@ -5,6 +5,7 @@ TT_SECRET / TT_REFRESH environment variables as a fallback. Nothing secret goes 
 """
 import asyncio
 import os
+from datetime import date, timedelta
 
 SERVICE = "swingbot-tastytrade"
 
@@ -127,7 +128,36 @@ def require_send_enabled(cfg):
 WORKING = {"Received", "Routed", "In Flight", "Live", "Contingent"}
 
 
-async def _sync(desired, managed, prices, max_order_usd, dry_run):
+def valid_price(px) -> bool:
+    """False for NaN, zero, negative or missing prices (Yahoo gives NaN when there is no quote)."""
+    return isinstance(px, (int, float)) and px == px and px > 0
+
+
+def effective_actual(positions: dict, net_filled: dict, symbols) -> dict:
+    """Shares the sandbox really holds per symbol. The positions list is trusted when it shows the symbol.
+    The sandbox has been seen to drop positions after fills while cash stayed reduced, so when it shows
+    nothing we fall back to the net quantity from filled orders (buys minus sells)."""
+    out = {}
+    for sym in symbols:
+        q = int(positions.get(sym, 0))
+        out[sym] = q if q else max(int(net_filled.get(sym, 0)), 0)
+    return out
+
+
+async def _net_filled(account, session, symbols, since):
+    """Net filled quantity per symbol from order history: buys minus sells."""
+    net = {}
+    for o in await account.get_order_history(session, start_date=since, per_page=100):
+        if str(getattr(o.status, "value", o.status)) != "Filled":
+            continue
+        for leg in o.legs:
+            if leg.symbol in symbols:
+                sign = 1 if "buy" in str(leg.action.value).lower() else -1
+                net[leg.symbol] = net.get(leg.symbol, 0) + sign * sum(int(f.quantity) for f in (leg.fills or []))
+    return net
+
+
+async def _sync(desired, managed, prices, max_order_usd, dry_run, lookback_days=30):
     from decimal import Decimal
     from tastytrade import Account, Session
     from tastytrade.instruments import Equity
@@ -136,11 +166,13 @@ async def _sync(desired, managed, prices, max_order_usd, dry_run):
     secret, refresh = load_credentials()
     session = Session(secret, refresh, is_test=True)          # never production
     account = (await Account.get(session))[0]
-    actual = {}
+    positions = {}
     for p in await account.get_positions(session):
         if str(getattr(p.instrument_type, "value", p.instrument_type)) == "Equity" and p.symbol in managed:
             q = int(p.quantity)
-            actual[p.symbol] = -q if "short" in str(getattr(p.quantity_direction, "value", p.quantity_direction)).lower() else q
+            positions[p.symbol] = -q if "short" in str(getattr(p.quantity_direction, "value", p.quantity_direction)).lower() else q
+    since = date.today() - timedelta(days=lookback_days)
+    actual = effective_actual(positions, await _net_filled(account, session, managed, since), managed)
     # Orders still working count as already placed, so a re-run never doubles up.
     for o in await account.get_live_orders(session):
         if str(getattr(o.status, "value", o.status)) not in WORKING:
@@ -151,7 +183,10 @@ async def _sync(desired, managed, prices, max_order_usd, dry_run):
                 actual[leg.symbol] = actual.get(leg.symbol, 0) + (rem if "buy" in str(leg.action.value).lower() else -rem)
     lines = []
     for sym, delta in diff_positions(desired, actual, managed).items():
-        px = prices[sym]
+        px = prices.get(sym)
+        if not valid_price(px):
+            lines.append(f"SKIP  {sym}: no valid price right now (market closed or no quote); will retry next run")
+            continue
         notional = abs(delta) * px
         if notional > max_order_usd:
             lines.append(f"SKIP  {sym}: {delta:+d} shares (${notional:,.0f}) is over the ${max_order_usd:,.0f} per-order cap")
@@ -179,4 +214,41 @@ def sync_positions(cfg, desired: dict, managed, prices: dict, dry_run=False) -> 
     if not require_send_enabled(cfg) and not dry_run:
         return "tastytrade.send_orders is false: sandbox orders are off."
     cap = float(cfg.get("tastytrade", {}).get("max_order_usd", 2500))
-    return asyncio.run(_sync(desired, set(managed), prices, cap, dry_run))
+    days = int(cfg.get("tastytrade", {}).get("fill_lookback_days", 30))
+    return asyncio.run(_sync(desired, set(managed), prices, cap, dry_run, days))
+
+
+# ---------- copy real sandbox fill prices back into the paper accounts ----------
+def vwap_for(fills: list, qty: int):
+    """Average price of the first `qty` shares in `fills` [(time, price, qty), ...] (oldest first).
+    None until the fills cover the whole quantity, so a partly filled order is never half-applied."""
+    need, cost = int(qty), 0.0
+    for _, price, q in sorted(fills, key=lambda f: f[0]):
+        take = min(int(q), need)
+        cost += price * take
+        need -= take
+        if need == 0:
+            return cost / int(qty)
+    return None
+
+
+async def _buy_fills(symbols, since):
+    from tastytrade import Account, Session
+    secret, refresh = load_credentials()
+    session = Session(secret, refresh, is_test=True)          # never production
+    account = (await Account.get(session))[0]
+    out = {}
+    for o in await account.get_order_history(session, start_date=since, per_page=100):
+        if str(getattr(o.status, "value", o.status)) != "Filled":
+            continue
+        for leg in o.legs:
+            if leg.symbol in symbols and "buy" in str(leg.action.value).lower():
+                for f in leg.fills or []:
+                    out.setdefault(leg.symbol, []).append((f.filled_at, float(f.fill_price), int(f.quantity)))
+    return out
+
+
+def buy_fills(cfg, symbols, since) -> dict:
+    """Sandbox buy fills per symbol since a date: {symbol: [(filled_at, price, qty), ...]}."""
+    require_send_enabled(cfg)   # sandbox-only guard
+    return asyncio.run(_buy_fills(set(symbols), since))

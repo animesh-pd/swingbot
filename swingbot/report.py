@@ -73,12 +73,26 @@ def performance(journal_path: str, broker, equity: float, cfg) -> str:
     return "\n".join(L)
 
 
-def notify(text: str, cfg: dict, title: str = "SwingBot"):
+def trade_alert(r: dict, cfg: dict):
+    """Short phone message for a scan: just the buys and sells, or None when nothing happened."""
+    L = list(r["exits"])
+    for o in r["entries"]:
+        if o["kind"] == "share":
+            L.append(f"BUY {o['qty']} {o['ticker']} @ ~{o['price']:.2f} (stop {o['stop']}, trim {o['target']})")
+        else:
+            L.append(f"BUY {o['qty']}x {describe(o['contract'])}")
+    if L and cfg.get("mode") != "paper":
+        L.insert(0, "SUGGESTED (alerts mode, nothing was recorded):")
+    return "\n".join(L) or None
+
+
+def notify(text: str, cfg: dict, title: str = "SwingBot", push: bool = True, console: bool = True):
+    """Print to the console and/or push to the phone (ntfy). Titles must be plain ASCII (they travel in an HTTP header)."""
     a = cfg.get("alerts", {})
-    if a.get("console", True):
+    if console and a.get("console", True):
         print(text)
     topic = a.get("ntfy_topic")
-    if topic:
+    if push and topic:
         try:
             requests.post(f"https://ntfy.sh/{topic}", data=text.encode()[:4000],
                           headers={"Title": title}, timeout=10)

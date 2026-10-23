@@ -10,6 +10,10 @@
   python run.py rotate [--record]  Strategy C: monthly ETF trend-rotation plan (own $5k account, state_rotation/)
   python run.py rotate-backtest    replay Strategy C on 2007-now (needs internet)
   python run.py tt-sync [--dry]    match the tastytrade SANDBOX to both bots' paper accounts (--dry = validate only)
+  python run.py weekly [--dry]     Friday summary: trades, P&L, both bots vs SPY (pushed to your phone)
+  python run.py can-run <job>      would this job run right now? (scan|monitor|rotate|weekly|keepawake; checks holidays and market hours)
+  python run.py notify-test        send one test message to your phone (ntfy)
+  python run.py tt-fills [--dry]   copy real sandbox fill prices into the paper accounts (also runs after scan / rotate / tt-sync)
   python run.py tt-check   read-only tastytrade sandbox connection test (places no orders)
   python run.py tt-dryrun   build today's scan entries as sandbox orders and validate them (dry run only)
   python run.py core-test   run the offline unit tests (tests/test_rules.py and tests/test_rotation.py)
@@ -26,7 +30,7 @@ import yaml
 
 from swingbot.broker import PaperBroker
 from swingbot.engine import Engine
-from swingbot.report import brief, notify, performance
+from swingbot.report import brief, notify, performance, trade_alert
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ET = ZoneInfo("America/New_York")
@@ -48,7 +52,10 @@ def load(state_dir="state", data=None, news_fetch=None, override=None):
 def cmd_scan(cfg, broker, eng, today=None):
     today = today or datetime.now(ET).date()
     r = eng.scan(today, place_orders=(cfg["mode"] == "paper"))
-    notify(brief(r, broker, cfg), cfg, "SwingBot brief")
+    notify(brief(r, broker, cfg), cfg, "SwingBot brief", push=False)   # long brief: console only
+    alert = trade_alert(r, cfg)
+    if alert:
+        notify(alert, cfg, "SwingBot trade", console=False)
     return r
 
 
@@ -105,7 +112,7 @@ def cmd_demo():
 def cmd_core_test():
     import subprocess
     failed = 0
-    for name in ("test_rules.py", "test_rotation.py"):
+    for name in ("test_rules.py", "test_rotation.py", "test_market_calendar.py"):
         print(f"=== {name} ===")
         if subprocess.call([sys.executable, os.path.join(HERE, "tests", name)], cwd=HERE) != 0:
             failed += 1
@@ -155,7 +162,7 @@ def cmd_rotate(args, today=None, closes=None, prices=None, mirror=False):
         text += "\nThis is the monthly rebalance. After you place the trades, run: python run.py rotate --record"
     else:
         text += f"\nNot a rebalance day (last one: {acct.get('last_rebalance')}). Plan above is informational; trade monthly."
-    notify(text, cfg, "Rotation")
+    notify(text, cfg, "Rotation", push=bool(orders) and due)
     if mirror:
         _rotation_mirror(cfg, acct, prices)
     return orders
@@ -219,6 +226,59 @@ def _rotation_mirror(cfg, acct, prices, dry_run=False):
         print(f"Sandbox sync failed: {type(e).__name__}: {e}")
 
 
+def _apply_fills(cfg, dry_run=False):
+    """Replace paper entry prices with the sandbox's real fill prices, once per position.
+    Only buys, and only when the fills cover the whole position. Cash, stop and target move with the entry."""
+    from datetime import timedelta
+    from swingbot import rotation, tastytrade_conn as tt
+    tt.require_send_enabled(cfg)   # refuses unless sandbox mode; reading fills places no orders, so it also runs while send_orders is off
+    broker = PaperBroker(os.path.join(HERE, "state", "account.json"), os.path.join(HERE, "state", "journal.csv"), cfg)
+    acct = rotation.Account(os.path.join(HERE, "state_rotation", "account.json"), cfg["rotation"]["capital"])
+    swing = [p for p in broker.positions if p["kind"] == "share" and not p.get("fill_synced")]
+    rot = {s: h for s, h in acct["holdings"].items() if not h.get("fill_synced")}
+    if not swing and not rot:
+        return
+    first = [p["entry_date"] for p in swing] + [date.fromisoformat(l["date"]) for l in acct["log"] if l["side"] == "buy"]
+    try:
+        fills = tt.buy_fills(cfg, {p["ticker"] for p in swing} | set(rot), min(first) - timedelta(days=1))
+    except tt.MissingCredentials as e:
+        return print(e)
+    except Exception as e:
+        return print(f"Fill sync failed: {type(e).__name__}: {e}")
+    lines, changed = [], False
+    for p in swing:
+        px = tt.vwap_for(fills.get(p["ticker"], []), p["qty"])
+        if px is None:
+            continue
+        px, old = round(px, 2), p["entry"]
+        lines.append(f"{p['ticker']}: paper entry {old:.2f} -> sandbox fill {px:.2f} ({(px - old) * p['qty']:+.2f} on {p['qty']} shares)")
+        if not dry_run:
+            broker.s["cash"]["share"] += (old - px) * p["qty"]
+            p["stop"], p["target"] = round(p["stop"] * px / old, 2), round(p["target"] * px / old, 2)
+            p.update(entry=px, high=px, fill_synced=True, paper_entry=old)
+            changed = True
+    for s_, h in rot.items():
+        px = tt.vwap_for(fills.get(s_, []), h["qty"])
+        if px is None:
+            continue
+        old = h["cost"]
+        lines.append(f"{s_}: paper cost {old:.2f} -> sandbox fill {px:.2f} ({(px - old) * h['qty']:+.2f} on {h['qty']} shares)")
+        if not dry_run:
+            acct.s["cash"] += (old - px) * h["qty"]
+            h.update(cost=px, fill_synced=True, paper_cost=old)
+            for l in acct["log"]:   # keep the trade log in step with the real fill
+                if l["symbol"] == s_ and l["side"] == "buy" and l["qty"] == h["qty"]:
+                    l["fill"] = round(px, 4)
+            changed = True
+    if lines:
+        print("Fill sync" + (" (dry run)" if dry_run else "") + ":")
+        for line in lines:
+            print("  " + line)
+    if changed:
+        broker.save()
+        acct.save()
+
+
 def cmd_tt_sync(args):
     """Reconcile the sandbox with both bots' paper accounts right now. `--dry` validates without sending."""
     from swingbot import rotation
@@ -228,6 +288,87 @@ def cmd_tt_sync(args):
     acct = rotation.Account(os.path.join(HERE, "state_rotation", "account.json"), cfg["rotation"]["capital"])
     _, prices = rotation.load_live(set(cfg["rotation"]["universe"]) | set(acct["holdings"]))
     _rotation_mirror(cfg, acct, prices, dry)
+    _apply_fills(cfg, dry)
+
+
+def _closes(symbols):
+    """Recent unadjusted daily closes per symbol (Yahoo)."""
+    import logging
+    import yfinance as yf
+    logging.getLogger("yfinance").setLevel(logging.CRITICAL)
+    df = yf.download(sorted(symbols), period="1mo", auto_adjust=False, progress=False)["Close"]
+    return {s_: df[s_].dropna() for s_ in df.columns if df[s_].dropna().size}
+
+
+def cmd_weekly(args, today=None):
+    """Friday summary: trades, realized and open P&L, both bots vs SPY. Pushed to the phone. `--dry` saves nothing."""
+    import csv
+    import json
+    from swingbot import rotation, summary
+    cfg = yaml.safe_load(open(os.path.join(HERE, "config.yaml")))
+    today = today or datetime.now(ET).date()
+    ws = summary.monday_of(today)
+    in_week = lambda iso: ws <= date.fromisoformat(str(iso)[:10]) <= today   # noqa: E731
+    broker = PaperBroker(os.path.join(HERE, "state", "account.json"), os.path.join(HERE, "state", "journal.csv"), cfg)
+    acct = rotation.Account(os.path.join(HERE, "state_rotation", "account.json"), cfg["rotation"]["capital"])
+    closes = _closes({p["ticker"] for p in broker.positions} | set(acct["holdings"]) | {"SPY"})
+    last = {s_: float(c.iloc[-1]) for s_, c in closes.items()}
+    spy = closes["SPY"]
+    start_day = date.fromisoformat(str(cfg.get("summary", {}).get("start_date", "2026-10-16")))
+    spy_start = float(spy[spy.index.date <= start_day].iloc[-1])
+    spy_prev = float(spy[spy.index.date < ws].iloc[-1])
+
+    swing_eq = broker.equity({p["id"]: last.get(p["ticker"], p["entry"]) for p in broker.positions})
+    rot_eq = acct.equity({s_: last.get(s_, h["cost"]) for s_, h in acct["holdings"].items()})
+    snap_path = os.path.join(HERE, "state", "weekly_snapshots.json")
+    snaps = json.load(open(snap_path)) if os.path.exists(snap_path) else {}
+    before = [k for k in snaps if k < today.isoformat()]
+    swing_start = cfg["capital"]["shares_bucket"] + cfg["capital"]["options_bucket"]   # the swing bot's own $5,000
+    prev = snaps[max(before)] if before else {"swing": swing_start, "rotation": cfg["rotation"]["capital"]}
+
+    trades, realized, rows = [], 0.0, []
+    if os.path.exists(broker.journal_path):
+        rows = list(csv.DictReader(open(broker.journal_path)))
+    for p in broker.positions:   # still open, bought this week
+        if p["kind"] == "share" and in_week(p["entry_date"]):
+            trades.append(f"BUY {p['qty']} {p['ticker']} @ {p['entry']:.2f} ({date.fromisoformat(str(p['entry_date'])[:10]):%a})")
+    for r_ in rows:
+        if in_week(r_["opened"]):
+            trades.append(f"BUY {r_['qty']} {r_['position']} @ {float(r_['entry']):.2f} ({date.fromisoformat(r_['opened']):%a})")
+        if in_week(r_["closed"]):
+            realized += float(r_["pnl_usd"])
+            trades.append(f"SELL {r_['qty']} {r_['position']} @ {float(r_['exit']):.2f} P&L ${float(r_['pnl_usd']):+,.2f} ({r_['why_out'][:30]})")
+    for l in acct["log"]:
+        if in_week(l["date"]):
+            extra = f" P&L ${l['pnl']:+,.2f}" if l.get("pnl") is not None else ""
+            if l.get("pnl") is not None:
+                realized += l["pnl"]
+            trades.append(f"{l['side'].upper()} {l['qty']} {l['symbol']} @ {l['fill']:.2f}{extra} ({date.fromisoformat(l['date']):%a}, rotation)")
+    open_ = [{"symbol": p["ticker"], "pnl": (last.get(p["ticker"], p["entry"]) - p["entry"]) * p["qty"],
+              "pct": last.get(p["ticker"], p["entry"]) / p["entry"] - 1} for p in broker.positions if p["kind"] == "share"]
+    open_ += [{"symbol": s_, "pnl": (last.get(s_, h["cost"]) - h["cost"]) * h["qty"],
+               "pct": last.get(s_, h["cost"]) / h["cost"] - 1} for s_, h in acct["holdings"].items()]
+    text = summary.format_weekly({
+        "week_start": ws, "week_end": today,
+        "bots": [{"name": "Swing", "equity": swing_eq, "start": swing_start, "prev": prev["swing"]},
+                 {"name": "Rotation", "equity": rot_eq, "start": cfg["rotation"]["capital"], "prev": prev["rotation"]}],
+        "spy": {"week": last["SPY"] / spy_prev - 1, "since_start": last["SPY"] / spy_start - 1},
+        "trades": trades, "realized_week": realized, "open": open_})
+    if "--dry" not in args:
+        snaps[today.isoformat()] = {"swing": swing_eq, "rotation": rot_eq, "spy": last["SPY"]}
+        os.makedirs(os.path.dirname(snap_path), exist_ok=True)
+        json.dump(snaps, open(snap_path, "w"), indent=1)
+        os.makedirs(os.path.join(HERE, "logs"), exist_ok=True)
+        open(os.path.join(HERE, "logs", f"weekly-{today.isoformat()}.txt"), "w", encoding="utf-8").write(text)
+    notify(text, cfg, "SwingBot weekly summary", push="--dry" not in args)
+
+
+def cmd_notify_test():
+    cfg = yaml.safe_load(open(os.path.join(HERE, "config.yaml")))
+    topic = cfg.get("alerts", {}).get("ntfy_topic")
+    notify("SwingBot test: if you can read this on your phone, trade alerts and the weekly summary will reach you.",
+           cfg, "SwingBot test")
+    print("Pushed to ntfy." if topic else "No alerts.ntfy_topic set in config.yaml, so nothing was pushed.")
 
 
 
@@ -239,8 +380,20 @@ def main():
         return cmd_demo()
     if cmd == "backtest":
         return cmd_backtest(float(sys.argv[2]) if len(sys.argv) > 2 else 2.0)
+    if cmd == "can-run":   # used by the scheduler scripts: exit 0 = go, exit 1 = skip (reason printed)
+        from swingbot import market_calendar
+        ok, why = market_calendar.should_run(sys.argv[2] if len(sys.argv) > 2 else "scan")
+        print(why)
+        sys.exit(0 if ok else 1)
+    if cmd == "weekly":
+        return cmd_weekly(sys.argv[2:])
+    if cmd == "notify-test":
+        return cmd_notify_test()
     if cmd == "rotate":
-        return cmd_rotate(sys.argv[2:], mirror=True)
+        cmd_rotate(sys.argv[2:], mirror=True)
+        return _apply_fills(yaml.safe_load(open(os.path.join(HERE, "config.yaml"))))
+    if cmd == "tt-fills":
+        return _apply_fills(yaml.safe_load(open(os.path.join(HERE, "config.yaml"))), "--dry" in sys.argv)
     if cmd == "tt-sync":
         return cmd_tt_sync(sys.argv[2:])
     if cmd == "rotate-backtest":
@@ -266,6 +419,7 @@ def main():
     if cmd == "scan":
         cmd_scan(cfg, broker, eng)
         _swing_mirror(cfg, broker, eng)
+        _apply_fills(cfg)
     elif cmd == "monitor":
         if cmd_monitor(cfg, broker, eng):
             _swing_mirror(cfg, broker, eng)

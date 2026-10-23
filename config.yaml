@@ -102,4 +102,7 @@ tastytrade:
 
 alerts:
   console: true
-  ntfy_topic: ""     # optional: free phone push via the ntfy app, e.g. "swingbot-yourname-8x2k"
+  ntfy_topic: ""     # optional: free phone push via the ntfy app, e.g. "swingbot-yourname-8x2k". Anyone who knows the topic can read the alerts.
+
+summary:
+  start_date: 2026-10-16   # SPY's close on this day is the baseline for the weekly summary's 'since start'

@@ -50,6 +50,10 @@ The scripts behind these numbers are in [`research/`](research/README.md).
 | `python run.py backtest 2` | Replay the swing bot over the last 2 years |
 | `python run.py rotate-backtest` | Replay the rotation bot, 2007 to now |
 | `python run.py report` / `positions` | Performance and open positions |
+| `python run.py weekly [--dry]` | Friday summary: trades, realized and open P&L, both bots vs SPY (pushed to your phone) |
+| `python run.py notify-test` | Send one test message to your phone (ntfy) |
+| `python run.py can-run <job>` | Would this job run right now? Checks market holidays, half days and market hours |
+| `python run.py tt-fills [--dry]` | Copy real sandbox fill prices into the paper accounts |
 | `python run.py tt-check` | Read-only tastytrade sandbox connection test |
 | `python run.py tt-sync [--dry]` | Make the sandbox match the paper accounts (`--dry` validates only) |
 | `python run.py core-test` | Run all offline tests |
@@ -81,6 +85,22 @@ Built-in guardrails: sandbox-only session, a per-order dollar cap (`max_order_us
 orders count as already placed (re-runs never double up), and broker errors are reported without stopping the bot. Stock orders must
 use `BUY_TO_OPEN` / `SELL_TO_CLOSE`.
 
+## Phone alerts and a weekly summary (optional)
+
+1. Install the free **ntfy** app and pick a long, random topic name, for example `swingbot-` plus 16 random letters and digits.
+   Subscribe to it in the app. **Anyone who knows the topic can read your alerts**, so do not share it.
+2. Put it in `config.yaml` under `alerts.ntfy_topic`, then run `python run.py notify-test`.
+3. You then get a short message for each buy or sell (in `alerts` mode they are marked SUGGESTED), and a **weekly summary** from
+   `python run.py weekly`: the week's trades, realized and open P&L, each bot's equity for the week and since the start, and SPY over
+   the same periods. The long daily brief stays on the console only. Set `summary.start_date` to your own first trading day.
+
+## Market holidays and half days
+
+`swingbot/market_calendar.py` knows the NYSE holidays (computed by rule, including weekend observance and Good Friday) and the 1 PM ET
+early closes. `python run.py can-run scan` says whether a job should run right now. The scheduler scripts use it, so jobs skip
+holidays and weekends, the scan skips the part of a half day after the close, rotation only acts on days 1 to 5 of the month, and the
+weekly summary runs on the last trading day of the week.
+
 ## Scheduling on Windows
 
 Task Scheduler runs the bots without any app open. From PowerShell in this folder:
@@ -90,10 +110,14 @@ powershell -ExecutionPolicy Bypass -File scheduler\install_tasks.ps1          # 
 powershell -ExecutionPolicy Bypass -File scheduler\install_tasks.ps1 -Remove  # uninstall
 ```
 
-Edit the times in `install_tasks.ps1` for your time zone (the defaults assume US Central). `scheduler\run_bot.ps1` skips weekends and
-anything outside 9:35 AM to 3:55 PM Eastern, so a late wake-up never trades on after-hours prices, and logs to `logs\`. Set the
-`SWINGBOT_PYTHON` environment variable to your `python.exe` if it is not the default path. Tasks run only while you are signed in, and
-wake timers must be enabled (they are often off on battery). Market holidays are not detected.
+Edit the times in `install_tasks.ps1` for your time zone (the defaults assume US Central). `scheduler\run_bot.ps1` asks the market
+calendar before each job, so a late wake-up never trades on stale or after-hours prices, and logs to `logs\`. Set the
+`SWINGBOT_PYTHON` environment variable to your `python.exe` if it is not the default path. Tasks run only while you are signed in.
+
+**Keeping the laptop awake.** Windows "Modern Standby" laptops often will not wake for scheduled tasks. `scheduler\keep_awake.ps1`
+(a task that starts weekday mornings) holds a "system required" request until just after the close, so the machine stays awake only
+during market hours. It needs no admin rights and changes no power settings. Starting it still relies on the machine being awake or
+waking at that time; the simplest alternative is setting "sleep when plugged in" to Never.
 
 ## Project layout
 
@@ -109,6 +133,8 @@ research/          the backtest scripts and logs behind the findings above
 ## Known limits
 
 - Yahoo Finance data is delayed and sometimes missing (earnings dates especially). Check anything you rely on.
+- The tastytrade sandbox can list no positions even after orders fill, so the sync counts filled orders (last 30 days) as held.
+  Sandbox fills are simulated and differ from real markets.
 - Stops are checked on a schedule, not tick by tick, so gaps can jump past them.
 - Option prices in the backtest are modelled, not real quotes. The news filter is keyword-based and cannot be backtested.
 - Watchlists are hindsight-picked; the sandbox's fills differ from real markets.
