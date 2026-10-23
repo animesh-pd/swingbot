@@ -296,7 +296,7 @@ def _closes(symbols):
     import logging
     import yfinance as yf
     logging.getLogger("yfinance").setLevel(logging.CRITICAL)
-    df = yf.download(sorted(symbols), period="1mo", auto_adjust=False, progress=False)["Close"]
+    df = yf.download(sorted(symbols), period="2y", auto_adjust=False, progress=False)["Close"]   # long enough for any start date
     return {s_: df[s_].dropna() for s_ in df.columns if df[s_].dropna().size}
 
 
@@ -314,14 +314,16 @@ def cmd_weekly(args, today=None):
     closes = _closes({p["ticker"] for p in broker.positions} | set(acct["holdings"]) | {"SPY"})
     last = {s_: float(c.iloc[-1]) for s_, c in closes.items()}
     spy = closes["SPY"]
-    start_day = date.fromisoformat(str(cfg.get("summary", {}).get("start_date", "2026-10-16")))
-    spy_start = float(spy[spy.index.date <= start_day].iloc[-1])
+    snap_path = os.path.join(HERE, "state", "weekly_snapshots.json")
+    snaps = json.load(open(snap_path)) if os.path.exists(snap_path) else {}
+    # baseline for "since start": config summary.start_date, else the date of the first weekly summary, else today
+    start_day = date.fromisoformat(str((cfg.get("summary") or {}).get("start_date") or (min(snaps) if snaps else today.isoformat())))
+    before_start = spy[spy.index.date <= start_day]
+    spy_start = float(before_start.iloc[-1] if len(before_start) else spy.iloc[0])
     spy_prev = float(spy[spy.index.date < ws].iloc[-1])
 
     swing_eq = broker.equity({p["id"]: last.get(p["ticker"], p["entry"]) for p in broker.positions})
     rot_eq = acct.equity({s_: last.get(s_, h["cost"]) for s_, h in acct["holdings"].items()})
-    snap_path = os.path.join(HERE, "state", "weekly_snapshots.json")
-    snaps = json.load(open(snap_path)) if os.path.exists(snap_path) else {}
     before = [k for k in snaps if k < today.isoformat()]
     swing_start = cfg["capital"]["shares_bucket"] + cfg["capital"]["options_bucket"]   # the swing bot's own $5,000
     prev = snaps[max(before)] if before else {"swing": swing_start, "rotation": cfg["rotation"]["capital"]}

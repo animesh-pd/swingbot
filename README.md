@@ -92,7 +92,7 @@ use `BUY_TO_OPEN` / `SELL_TO_CLOSE`.
 2. Put it in `config.yaml` under `alerts.ntfy_topic`, then run `python run.py notify-test`.
 3. You then get a short message for each buy or sell (in `alerts` mode they are marked SUGGESTED), and a **weekly summary** from
    `python run.py weekly`: the week's trades, realized and open P&L, each bot's equity for the week and since the start, and SPY over
-   the same periods. The long daily brief stays on the console only. Set `summary.start_date` to your own first trading day.
+   the same periods. The long daily brief stays on the console only. "Since start" is measured from the first time you run `weekly`; to use an earlier day, add a `summary:` block with `start_date: YYYY-MM-DD` to `config.yaml`.
 
 ## Market holidays and half days
 
